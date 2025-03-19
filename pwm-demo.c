@@ -40,7 +40,7 @@
  
  
  // Arrays in which raw measurements will be stored
- fix15 acceleration[3], gyro[3];
+ fix15 acceleration[3], filter_accel[3], gyro[3], accel_angle, gyro_angle_delta, complementary_angle;
  
  // character array
  char screentext[40];
@@ -72,16 +72,45 @@
  volatile int control ;
  volatile int old_control ;
  
+ // Control variables
+ volatile float target_angle = 0.0f;  // Target angle in degrees
+ volatile float Kp = 2.0f;           // Proportional gain (adjust based on system response)
+ 
  // PWM interrupt service routine
  void on_pwm_wrap() {
      // Clear the interrupt flag that brought us here
      pwm_clear_irq(pwm_gpio_to_slice_num(PWM_OUT));
+     mpu6050_read_raw(acceleration, gyro);
+     
+ 
+     filter_accel[0] = filter_accel[0] + ((acceleration[0] - filter_accel[0])>>6);
+     filter_accel[1] = filter_accel[1] + ((acceleration[1] - filter_accel[1])>>6);
+     filter_accel[2] = filter_accel[2] + ((acceleration[2] - filter_accel[2])>>6);
+ 
+     // SMALL ANGLE APPROXIMATION
+     accel_angle = multfix15(float2fix15(atan2(filter_accel[1], filter_accel[2]) + M_PI), oneeightyoverpi) - float2fix15(90.0);
+ 
+     // Gyro angle delta (measurement times timestep) (15.16 fixed point)
+     gyro_angle_delta = multfix15(gyro[0], zeropt001) ;
+ 
+     // Complementary angle (degrees - 15.16 fixed point)
+     complementary_angle = multfix15(complementary_angle - gyro_angle_delta, zeropt999) + multfix15(accel_angle, zeropt001);
+ 
+     // P CONTROL LOGIC
+     float current_angle = fix2float15(complementary_angle); // Convert to degrees
+     float error = target_angle - current_angle;
+     float output = Kp * error ;
+ 
+     // Clamp duty cycle between 0 and 5000
+     if (control > 5000.0f) control = 5000.0f;
+     else if (control < 0.0f) control = 0.0f;
+     control = (int)output;
+ 
      // Update duty cycle
      if (control!=old_control) {
          old_control = control ;
          pwm_set_chan_level(slice_num, PWM_CHAN_A, control);
      }
-     mpu6050_read_raw(acceleration, gyro);
  
      // Signal VGA to draw
      PT_SEM_SIGNAL(pt, &vga_semaphore);
@@ -91,18 +120,15 @@
  static PT_THREAD (protothread_serial(struct pt *pt))
  {
      PT_BEGIN(pt) ;
-     static int test_in ;
+     static float input_angle;
      while(1) {
-         sprintf(pt_serial_out_buffer, "input a duty cycle (0-5000): ");
-         serial_write ;
-         // spawn a thread to do the non-blocking serial read
-         serial_read ;
-         // convert input string to number
-         sscanf(pt_serial_in_buffer,"%d", &test_in) ;
-         if (test_in > 5000) continue ;
-         else if (test_in < 0) continue ;
-         else control = test_in ;
+         sprintf(pt_serial_out_buffer, "Enter target angle (degrees): ");
+         serial_write;
+         serial_read;
+         sscanf(pt_serial_in_buffer, "%f", &input_angle);
+         target_angle = input_angle; // Update global target
      }
+     
      PT_END(pt) ;
  }
  
@@ -124,10 +150,13 @@
      // Control rate of drawing
      static int throttle ;
  
+     // Counter for beam angle refresh
+     static int beam_refresh_counter = 0;
+     static const int BEAM_REFRESH_INTERVAL = 20; // Adjust this value to control refresh rate
+ 
      // Draw the static aspects of the display
      setTextSize(1) ;
      setTextColor(WHITE);
- 
      // Draw bottom plot
      drawHLine(75, 430, 5, CYAN) ;
      drawHLine(75, 355, 5, CYAN) ;
@@ -157,12 +186,25 @@
      sprintf(screentext, "-250") ;
      setCursor(45, 225) ;
      writeString(screentext) ;
-     
- 
      while (true) {
          // Wait on semaphore
          PT_SEM_WAIT(pt, &vga_semaphore);
-         // Increment drawspeed controller
+         // Increment beam refresh counter
+         beam_refresh_counter++;
+ 
+         // Update beam angle display only if counter reaches the interval
+         if (beam_refresh_counter >= BEAM_REFRESH_INTERVAL) {
+             beam_refresh_counter = 0; // Reset counter
+ 
+             // Clear the previous beam angle display
+             fillRect(120, 50, 100, 50, BLACK);
+             setCursor(50, 50);
+             sprintf(screentext, "Beam Angle:  %d", fix2int15(complementary_angle));
+             writeString(screentext);
+         }
+         // setCursor(50, 75)
+         // sprintf(screentext, "Low Pass Motor:  %5.1f", fix2float15(complementary_angle));
+         // // Increment drawspeed controller
          throttle += 1 ;
          // If the controller has exceeded a threshold, draw
          if (throttle >= threshold) { 
@@ -173,9 +215,9 @@
              drawVLine(xcoord, 0, 480, BLACK) ;
  
              // Draw bottom plot (multiply by 120 to scale from +/-2 to +/-250)
-             drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[0])*120.0)-OldMin)/OldRange)), WHITE) ;
-             drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[1])*120.0)-OldMin)/OldRange)), RED) ;
-             drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[2])*120.0)-OldMin)/OldRange)), GREEN) ;
+             drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(filter_accel[0])*120.0)-OldMin)/OldRange)), WHITE) ;
+             drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(filter_accel[1])*120.0)-OldMin)/OldRange)), RED) ;
+             drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(filter_accel[2])*120.0)-OldMin)/OldRange)), GREEN) ;
  
              // Draw top plot
              drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[0]))-OldMin)/OldRange)), WHITE) ;
@@ -236,7 +278,7 @@
      pwm_set_clkdiv(slice_num, CLKDIV) ;
  
      //invert
-     pwm_set_output_polarity (slice_num, 0, 1);
+     pwm_set_output_polarity (slice_num, 1, 1);
  
      // This sets duty cycle
      pwm_set_chan_level(slice_num, PWM_CHAN_A, 3125);
