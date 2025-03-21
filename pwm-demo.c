@@ -76,7 +76,9 @@
  // Control variables
  volatile float target_angle = 0.0f;  // Target angle in degrees
  volatile float Kp = 20.0f;           // Proportional gain (adjust based on system response)
- 
+ volatile float Kd = 40.0f;           // Derivative Term (2-3x Kp) ADJUST!
+ volatile float Ki = 10.0f;           // Integral Term (same order as Kp) ADJSUT! 
+
  // PWM interrupt service routine
  void on_pwm_wrap() {
      // Clear the interrupt flag that brought us here
@@ -98,11 +100,21 @@
      complementary_angle = multfix15(complementary_angle + gyro_angle_delta, zeropt999) + multfix15(accel_angle, zeropt001);
  
      // P CONTROL LOGIC
+     float integral_sum = 0.0f;
+     float prev_error = 0.0f;
+    
      float current_angle = fix2float15(complementary_angle); // Convert to degrees
+     float delta_t = 1.0f;
      float error = target_angle - current_angle;
-     float output = Kp * error ;
+    
+     //PID Calculations     
+     float proportional = Kp * error;
+     integral_sum += Ki* error * delta_t; 
+     float derivative = Kd * (error - prev_error) / delta_t;
+
+     float output = proportional + integral_sum + derivative;
      error_tracker = float2fix15(error);
-     control = (int)output;
+     int control = (int)output;
      control_filtered = control;
      control_filtered = control_filtered + ((control - control_filtered)>>2);
  
@@ -127,18 +139,32 @@
      PT_BEGIN(pt) ;
      static float input_angle;
      static float input_kp;
+     static float input_kd;
+     static float input_ki;
      while(1) {
          sprintf(pt_serial_out_buffer, "Enter target angle (degrees): ");
          serial_write;
          serial_read;
          sscanf(pt_serial_in_buffer, "%f", &input_angle);
          target_angle = input_angle; // Update global target
+         
          sprintf(pt_serial_out_buffer, "Enter PID P Constant: ");
          serial_write;
          serial_read;
          sscanf(pt_serial_in_buffer, "%f", &input_kp);
          Kp = input_kp;
- 
+
+         sprintf(pt_serial_in_buffer, "%f", "Enter PID Kd");
+         serial_write;
+         serial_read;
+         sscanf(pt_serial_in_buffer, "%f", &input_kd)
+         Kd = input_kd;
+
+         sprintf(pt_serial_in_buffer, "%f", "Enter PID Ki");
+         serial_write;
+         serial_read;
+         sscanf(pt_serial_in_buffer, "%f", &input_ki)
+         Ki = input_ki;
         
      }
      
