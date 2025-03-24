@@ -59,7 +59,7 @@
  // PWM wrap value and clock divide value
  // For a CPU rate of 125 MHz, this gives
  // a PWM frequency of 1 kHz.
- #define WRAPVAL 5000
+ #define WRAPVAL 3000
  #define CLKDIV 25.0f
  
  // GPIO we're using for PWM
@@ -76,9 +76,10 @@
  // Control variables
  volatile float target_angle = 0.0f;  // Target angle in degrees
  volatile float Kp = 20.0f;           // Proportional gain (adjust based on system response)
- volatile float Kd = 40.0f;           // Derivative Term (2-3x Kp) ADJUST!
+ volatile float Kd = 1000.0f;         // Derivative Term (10^(2-3)x Kp) ADJUST!
  volatile float Ki = 10.0f;           // Integral Term (same order as Kp) ADJSUT! 
-
+ 
+ 
  // PWM interrupt service routine
  void on_pwm_wrap() {
      // Clear the interrupt flag that brought us here
@@ -91,35 +92,43 @@
      filter_accel[2] = filter_accel[2] + ((acceleration[2] - filter_accel[2])>>6);
  
      // SMALL ANGLE APPROXIMATION
-     accel_angle = multfix15(float2fix15(atan2(filter_accel[1], filter_accel[2]) + M_PI), oneeightyoverpi) - float2fix15(90.0);
+     accel_angle = multfix15(float2fix15(atan2(fix2float15(filter_accel[1]), fix2float15(filter_accel[2])) + M_PI), oneeightyoverpi) - float2fix15(90.0f);
  
      // Gyro angle delta (measurement times timestep) (15.16 fixed point)
      gyro_angle_delta = multfix15(gyro[0], zeropt001) ;
  
      // Complementary angle (degrees - 15.16 fixed point)
      complementary_angle = multfix15(complementary_angle + gyro_angle_delta, zeropt999) + multfix15(accel_angle, zeropt001);
- 
+     
      // P CONTROL LOGIC
      float integral_sum = 0.0f;
      float prev_error = 0.0f;
-    
+     float delta_t = 0.01f;
+ 
      float current_angle = fix2float15(complementary_angle); // Convert to degrees
-     float delta_t = 1.0f;
      float error = target_angle - current_angle;
-    
-     //PID Calculations     
-     float proportional = Kp * error;
-     integral_sum += Ki* error * delta_t; 
-     float derivative = Kd * (error - prev_error) / delta_t;
-
-     float output = proportional + integral_sum + derivative;
+     
+     float proportional = (Kp * error);
+     
+     float derivative = Kd * ((error - prev_error) / delta_t);
+     prev_error = error;
+ 
+     integral_sum += error * delta_t; 
+     
+     float output = proportional + (Ki * integral_sum) + derivative;
+     // float output = proportional + derivative;
+ 
+     //float output = Kp * error ;
      error_tracker = float2fix15(error);
-     int control = (int)output;
+     control = (int)output;
      control_filtered = control;
      control_filtered = control_filtered + ((control - control_filtered)>>2);
  
+     
+ 
+ 
      // Clamp duty cycle between 0 and 5000
-     if (control > 3500.0f) control = 3500.0f;
+     if (control > 3000.0f) control = 3000.0f;
      else if (control < 0.0f) control = 0.0f;
      
  
@@ -138,34 +147,52 @@
  {
      PT_BEGIN(pt) ;
      static float input_angle;
-     static float input_kp;
-     static float input_kd;
-     static float input_ki;
+     static float input_kp, input_ki, input_kd;
+     char command[100];
      while(1) {
-         sprintf(pt_serial_out_buffer, "Enter target angle (degrees): ");
+         sprintf(pt_serial_out_buffer, "Enter command (e.g., 'set angle 90' or 'set kp 30'): ");
          serial_write;
          serial_read;
-         sscanf(pt_serial_in_buffer, "%f", &input_angle);
-         target_angle = input_angle; // Update global target
          
-         sprintf(pt_serial_out_buffer, "Enter PID P Constant: ");
-         serial_write;
-         serial_read;
-         sscanf(pt_serial_in_buffer, "%f", &input_kp);
-         Kp = input_kp;
-
-         sprintf(pt_serial_in_buffer, "%f", "Enter PID Kd");
-         serial_write;
-         serial_read;
-         sscanf(pt_serial_in_buffer, "%f", &input_kd)
-         Kd = input_kd;
-
-         sprintf(pt_serial_in_buffer, "%f", "Enter PID Ki");
-         serial_write;
-         serial_read;
-         sscanf(pt_serial_in_buffer, "%f", &input_ki)
-         Ki = input_ki;
-        
+         // Read the user input
+         sscanf(pt_serial_in_buffer, "%s %f", command, &input_angle); // Read the command
+         
+         // Check for 'set angle' command
+         if (strcmp(command, "set") == 0 && strstr(pt_serial_in_buffer, "angle") != NULL) {
+             sscanf(pt_serial_in_buffer, "set angle %f", &input_angle);
+             target_angle = input_angle;  // Update the global target angle
+             sprintf(pt_serial_out_buffer, "Target angle set to: %.2f degrees\n", target_angle);
+             serial_write;
+         }
+         
+         // Check for 'set kp' command
+         else if (strcmp(command, "set") == 0 && strstr(pt_serial_in_buffer, "kp") != NULL) {
+             sscanf(pt_serial_in_buffer, "set kp %f", &input_kp);
+             Kp = input_kp;  // Update the global Kp value
+             sprintf(pt_serial_out_buffer, "Kp set to: %.2f\n", Kp);
+             serial_write;
+         }
+ 
+         else if (strcmp(command, "set") == 0 && strstr(pt_serial_in_buffer, "ki") != NULL) {
+             sscanf(pt_serial_in_buffer, "set ki %f", &input_ki);
+             Ki = input_ki;  // Update the global Kp value
+             sprintf(pt_serial_out_buffer, "Ki set to: %.2f\n", Ki);
+             serial_write;
+         }
+ 
+         else if (strcmp(command, "set") == 0 && strstr(pt_serial_in_buffer, "kd") != NULL) {
+             sscanf(pt_serial_in_buffer, "set kd %f", &input_kd);
+             Kd = input_kd;  // Update the global Kp value
+             sprintf(pt_serial_out_buffer, "Kd set to: %.2f\n", Kd);
+             serial_write;
+         }
+         
+         else {
+             sprintf(pt_serial_out_buffer, "Invalid command. Please use 'set angle' or 'set kp/ki/kd'.\n");
+             serial_write;
+         }
+         
+         serial_read;  // Read input after printing the response
      }
      
      PT_END(pt) ;
@@ -320,7 +347,7 @@
      pwm_set_output_polarity (slice_num, 1, 1);
  
      // This sets duty cycle
-     pwm_set_chan_level(slice_num, PWM_CHAN_A, 3125);
+     pwm_set_chan_level(slice_num, PWM_CHAN_A, 0);
  
      // Start the channel
      pwm_set_mask_enabled((1u << slice_num));
